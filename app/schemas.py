@@ -204,3 +204,14 @@ class EventJoinRequest(BaseModel):
 
 class EventTransferRequest(BaseModel):
     recipient_user_id: UUID
+
+
+# --- NEARBY ---
+
+class NearbyParticipantResponse(BaseModel):
+    user_id: UUID
+    display_name: str
+    is_anonymous: bool
+    area_name: str
+    distance_label: str
+    visible_in_nearby: bool = True
