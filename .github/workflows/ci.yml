@@ -1,10 +1,11 @@
-name: Proximity Backend CI
+name: Proximity Backend CI & Deploy
 
 on:
   push:
     branches: [ master ]
   pull_request:
     branches: [ master ]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -71,18 +72,41 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: "pip"
 
-      - name: Install FastAPI CLI
-        run: pip install "fastapi[standard]"
+      - name: Install Dependencies & CLI
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "fastapi[standard]"
+
+      - name: Run Cloud Database Migrations
+        if: "${{ env.DATABASE_URL != '' }}"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python scripts/deploy_cloud_db.py
 
       - name: Deploy to FastAPI Cloud
-        if: env.FASTAPI_CLOUD_API_TOKEN != ''
+        if: "${{ env.FASTAPI_CLOUD_TOKEN != '' && env.FASTAPI_CLOUD_APP_ID != '' }}"
         env:
-          FASTAPI_CLOUD_API_TOKEN: ${{ secrets.FASTAPI_CLOUD_API_TOKEN }}
+          FASTAPI_CLOUD_TOKEN: ${{ secrets.FASTAPI_CLOUD_TOKEN }}
+          FASTAPI_CLOUD_APP_ID: ${{ secrets.FASTAPI_CLOUD_APP_ID }}
         run: |
-          fastapi deploy --no-wait
+          fastapi deploy
+
+      - name: Verify Live Production Health
+        if: "${{ env.PUBLIC_API_URL != '' }}"
+        env:
+          PUBLIC_API_URL: ${{ secrets.PUBLIC_API_URL }}
+        run: |
+          echo "Verifying live endpoint at $PUBLIC_API_URL"
+          curl --fail --retry 5 --retry-delay 5 --max-time 10 "$PUBLIC_API_URL/health"
+          curl --fail --retry 5 --retry-delay 5 --max-time 10 "$PUBLIC_API_URL/health/ready"

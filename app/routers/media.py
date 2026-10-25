@@ -4,16 +4,16 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import or_, and_
 
 from app.database import get_db
 from app.models import MediaObject, User, LandmarkVisit, EventParticipant, Event, DmConversation, UserBlock
-from sqlalchemy import or_, and_
 from app.schemas import MediaUploadResponse, MediaDownloadTokenResponse
 from app.dependencies import get_current_user, get_optional_user
 from app.config import get_settings
+from app.storage import get_storage_backend
 from app.media import (
     validate_image_bytes,
     create_media_download_token,
@@ -140,17 +140,23 @@ async def upload_media(
 
         assigned_seq = 0
 
-    os.makedirs(settings.MEDIA_STORAGE_DIR, exist_ok=True)
+    storage = get_storage_backend()
     media_id = uuid.uuid4()
-    storage_path = os.path.join(settings.MEDIA_STORAGE_DIR, f"{media_id}.{ext}")
+    storage_key = f"media/{media_id}.{ext}"
 
-    with open(storage_path, "wb") as f:
-        f.write(content)
+    # Atomic step 1: write to storage
+    try:
+        await storage.save_file(storage_key, content, detected_mime)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist media to storage",
+        )
 
     expires_at = now_utc + timedelta(hours=current_user.message_retention_hours)
     media_obj = MediaObject(
         id=media_id,
-        storage_path=storage_path,
+        storage_path=storage_key,
         channel_kind=channel_kind,
         channel_id=channel_id,
         sender_id=current_user.id,
@@ -162,9 +168,19 @@ async def upload_media(
         created_at=now_utc,
         expires_at=expires_at,
     )
-    db.add(media_obj)
-    db.commit()
-    db.refresh(media_obj)
+
+    # Atomic step 2: write to database with rollback & storage cleanup on failure
+    try:
+        db.add(media_obj)
+        db.commit()
+        db.refresh(media_obj)
+    except Exception as exc:
+        db.rollback()
+        await storage.delete_file(storage_key)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save media metadata",
+        )
 
     return MediaUploadResponse(
         media_id=media_obj.id,
@@ -201,7 +217,7 @@ def get_media_download_token(
 
 
 @router.get("/{media_id}")
-def download_media(
+async def download_media(
     media_id: UUID,
     token: Optional[str] = Query(None),
     current_user: Optional[User] = Depends(get_optional_user),
@@ -231,19 +247,22 @@ def download_media(
         )
 
     media = db.query(MediaObject).filter(MediaObject.id == media_id).first()
-    if not media or not os.path.exists(media.storage_path):
+    if not media:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
 
-    # Defense against filesystem path traversal
-    clean_media_dir = os.path.abspath(settings.MEDIA_STORAGE_DIR)
-    clean_file_path = os.path.abspath(media.storage_path)
-    if not clean_file_path.startswith(clean_media_dir + os.sep):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-
+    # Enforce authorization BEFORE touching storage
     if not check_media_access_authorization(media, user_id, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Unauthorized to access this media",
         )
 
-    return FileResponse(media.storage_path, media_type=media.mime_type)
+    storage = get_storage_backend()
+    try:
+        data, content_type = await storage.get_file(media.storage_path)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error retrieving media from storage")
+
+    return Response(content=data, media_type=media.mime_type)

@@ -19,9 +19,17 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
+    STORAGE_BACKEND: str = "local"  # local | s3
     MEDIA_STORAGE_DIR: str = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "storage", "media"
     )
+    S3_ENDPOINT_URL: Optional[str] = None
+    S3_BUCKET_NAME: str = "proximity-media"
+    S3_ACCESS_KEY_ID: Optional[str] = None
+    S3_SECRET_ACCESS_KEY: Optional[str] = None
+    S3_REGION: str = "us-east-1"
+
+    CORS_ALLOWED_ORIGINS: str = ""
     MAX_IMAGE_BYTES: int = 5 * 1024 * 1024  # 5 MB
     MAX_LOCATION_AGE_SECONDS: int = 30
     MAX_GPS_ACCURACY_METERS: float = 50.0
@@ -52,6 +60,8 @@ class Settings(BaseSettings):
             data["SECRET_KEY"] = "[REDACTED]"
         if "DATABASE_URL" in data and data["DATABASE_URL"]:
             data["DATABASE_URL"] = "[REDACTED]"
+        if "S3_SECRET_ACCESS_KEY" in data and data["S3_SECRET_ACCESS_KEY"]:
+            data["S3_SECRET_ACCESS_KEY"] = "[REDACTED]"
         return data
 
 
