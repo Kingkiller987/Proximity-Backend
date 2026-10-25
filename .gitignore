@@ -1,10 +1,36 @@
+# Python & virtual environment
 .venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment & secrets
 .env
 .env.*
 !.env.example
-__pycache__/
-*.py[cod]
-.pytest_cache/
+
+# Local storage & runtime artifacts
 storage/
 *.log
 
+# Database dumps and local backups
+*.dump
+*.sql.gz
+*.bak
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Local agent rules, memory, and workflow customizations
+.agents/
+AGENTS.md
+GEMINI.md
+PROGRESS.md
+DECISIONS.md
+scratch/
