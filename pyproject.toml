@@ -1,0 +1,26 @@
+[project]
+name = "proximity-backend"
+version = "0.1.0"
+description = "FastAPI backend with PostGIS spatial search, ephemeral messaging, and location verification for Proximity"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.115.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    "psycopg[binary]>=3.2.0",
+    "geoalchemy2>=0.15.0",
+    "pydantic[email]>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-jose[cryptography]>=3.3.0",
+    "python-multipart>=0.0.9",
+    "pillow>=10.3.0",
+    "shapely>=2.0.4",
+    "argon2-cffi>=23.1.0",
+    "pyjwt>=2.8.0",
+    "pytz>=2024.1",
+]
+
+[tool.fastapi]
+entrypoint = "app.main:app"

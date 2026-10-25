@@ -1,0 +1,88 @@
+name: Proximity Backend CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Pytest & PostGIS Verification
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgis/postgis:17-3.5
+        env:
+          POSTGRES_USER: proximity
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: proximity
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "fastapi[standard]" pytest pytest-asyncio
+
+      - name: Create Test Database and Run Migrations
+        env:
+          PGPASSWORD: testpassword
+        run: |
+          psql -h 127.0.0.1 -U proximity -d proximity -c "CREATE DATABASE proximity_test;"
+          psql -h 127.0.0.1 -U proximity -d proximity_test -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+          alembic upgrade head
+          alembic -x db=test upgrade head
+
+      - name: Run Pytest Test Suite
+        env:
+          POSTGRES_USER: proximity
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: proximity
+          POSTGRES_TEST_DB: proximity_test
+          SECRET_KEY: test-secret-key-for-github-actions-ci
+        run: |
+          pytest -v
+
+  deploy:
+    name: FastAPI Cloud Deployment
+    needs: test
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install FastAPI CLI
+        run: pip install "fastapi[standard]"
+
+      - name: Deploy to FastAPI Cloud
+        if: env.FASTAPI_CLOUD_API_TOKEN != ''
+        env:
+          FASTAPI_CLOUD_API_TOKEN: ${{ secrets.FASTAPI_CLOUD_API_TOKEN }}
+        run: |
+          fastapi deploy --no-wait
