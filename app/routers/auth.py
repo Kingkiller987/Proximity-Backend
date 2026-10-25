@@ -114,9 +114,10 @@ def login(data: UserLoginRequest, db: Session = Depends(get_db)):
 @router.post("/refresh", response_model=TokenResponse)
 def refresh_token(data: RefreshTokenRequest, db: Session = Depends(get_db)):
     token_digest = hash_token(data.refresh_token)
+    # Row-level lock to prevent concurrent token rotation race conditions & duplicate issuance
     session_record = db.query(RefreshSession).filter(
         RefreshSession.token_hash == token_digest
-    ).first()
+    ).with_for_update().first()
 
     now_utc = datetime.now(timezone.utc)
     if not session_record or session_record.revoked_at is not None or session_record.expires_at <= now_utc:
@@ -155,7 +156,7 @@ def logout(data: RefreshTokenRequest, db: Session = Depends(get_db)):
     token_digest = hash_token(data.refresh_token)
     session_record = db.query(RefreshSession).filter(
         RefreshSession.token_hash == token_digest
-    ).first()
+    ).with_for_update().first()
 
     if session_record and session_record.revoked_at is None:
         session_record.revoked_at = datetime.now(timezone.utc)

@@ -21,7 +21,11 @@ def validate_location_fix(fix: LocationFixRequest) -> None:
         )
 
     now_utc = datetime.now(timezone.utc)
-    recorded_utc = fix.recorded_at.astimezone(timezone.utc)
+    recorded_utc = (
+        fix.recorded_at.replace(tzinfo=timezone.utc)
+        if fix.recorded_at.tzinfo is None
+        else fix.recorded_at.astimezone(timezone.utc)
+    )
     age_seconds = (now_utc - recorded_utc).total_seconds()
 
     if age_seconds < -5.0:
@@ -44,6 +48,9 @@ def make_geography_point(longitude: float, latitude: float):
 
 def format_coarse_distance_label(distance_meters: float) -> str:
     """Bucket distance to protect exact user coordinates."""
+    if math.isnan(distance_meters) or distance_meters < 0:
+        distance_meters = 0.0
+
     if distance_meters < 100:
         return "< 100m away"
     elif distance_meters < 1000:

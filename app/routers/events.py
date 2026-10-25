@@ -4,16 +4,18 @@ from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func, and_, or_, text
 
 from app.database import get_db
-from app.models import Event, EventParticipant, User
+from app.models import Event, EventParticipant, User, Message, ChannelSequence, UserBlock, MediaObject
 from app.schemas import (
     EventCreateRequest,
     EventResponse,
     EventJoinRequest,
     EventTransferRequest,
     LocationFixRequest,
+    LandmarkMessageCreateRequest,
+    ChatMessageResponse,
 )
 from app.dependencies import get_current_user, get_optional_user
 from app.location import (
@@ -151,7 +153,6 @@ def create_event(
     )
     db.add(event)
 
-    # Host is automatically joined as host participant
     host_part = EventParticipant(
         event_id=event_id,
         user_id=current_user.id,
@@ -182,7 +183,6 @@ def list_events(
 
     results = []
     for evt in events:
-        # Exclude invite-only events if not participant or host
         if evt.access_type == "inviteOnly":
             if not user_id:
                 continue
@@ -263,7 +263,8 @@ def start_event(
 ):
     validate_location_fix(fix)
 
-    event = db.query(Event).filter(Event.id == event_id).first()
+    # Invariant: Concurrency-safe row-level lock
+    event = db.query(Event).filter(Event.id == event_id).with_for_update().first()
     if not event or event.is_cancelled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
 
@@ -274,6 +275,19 @@ def start_event(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Event has ended")
 
     now_utc = datetime.now(timezone.utc)
+
+    # Invariant: Reject start if scheduled start time is more than 30m in future or if expired
+    if now_utc < event.starts_at - timedelta(minutes=30):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot start event earlier than 30 minutes before scheduled start time ({event.starts_at.isoformat()})",
+        )
+    if now_utc > event.expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Event expiration time has already passed ({event.expires_at.isoformat()})",
+        )
+
     if not is_within_operating_window(event, now_utc):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -307,7 +321,7 @@ def transfer_host_phase1(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    event = db.query(Event).filter(Event.id == event_id).first()
+    event = db.query(Event).filter(Event.id == event_id).with_for_update().first()
     if not event or event.is_cancelled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
 
@@ -373,7 +387,6 @@ def accept_transfer_phase2(
     event.host_id = current_user.id
     event.pending_host_transfer_user_id = None
 
-    # Update participant roles
     db.query(EventParticipant).filter(
         EventParticipant.event_id == event.id,
         EventParticipant.user_id == old_host_id,
@@ -396,7 +409,7 @@ def end_event(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    event = db.query(Event).filter(Event.id == event_id).first()
+    event = db.query(Event).filter(Event.id == event_id).with_for_update().first()
     if not event or event.is_cancelled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
 
@@ -408,3 +421,158 @@ def end_event(
     db.refresh(event)
 
     return _format_event_response(event, current_user.id, None, db)
+
+
+@router.get("/{event_id}/messages", response_model=List[ChatMessageResponse])
+def get_event_messages(
+    event_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event or event.is_cancelled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+
+    # Invariant: Must be joined participant or host to view event chat
+    is_part = db.query(EventParticipant).filter(
+        EventParticipant.event_id == event_id,
+        EventParticipant.user_id == current_user.id,
+    ).first()
+    if not is_part and event.host_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Must be an event participant to view event chat",
+        )
+
+    blocked_ids = [
+        row[0] for row in db.query(UserBlock.blocked_id).filter(UserBlock.blocker_id == current_user.id).all()
+    ] + [
+        row[0] for row in db.query(UserBlock.blocker_id).filter(UserBlock.blocked_id == current_user.id).all()
+    ]
+
+    query = db.query(Message).filter(
+        Message.channel_id == str(event_id),
+        Message.channel_kind == "event",
+        Message.expires_at > func.now(),
+    )
+    if blocked_ids:
+        query = query.filter(Message.sender_id.notin_(blocked_ids))
+
+    messages = query.order_by(Message.sequence.asc()).all()
+    results = []
+    for msg in messages:
+        results.append(
+            ChatMessageResponse(
+                id=msg.id,
+                channel_id=msg.channel_id,
+                sender_id=msg.sender_id,
+                sender_display_name=msg.sender_display_name,
+                is_anonymous=msg.is_anonymous,
+                body=msg.body,
+                sequence=msg.sequence,
+                area_name=msg.area_name,
+                distance_label="< 100m away",
+                attachment_id=msg.attachment_id,
+                is_system_notice=msg.is_system_notice,
+                created_at=msg.created_at,
+                expires_at=msg.expires_at,
+            )
+        )
+    return results
+
+
+@router.post("/{event_id}/messages", response_model=ChatMessageResponse, status_code=status.HTTP_201_CREATED)
+def post_event_message(
+    event_id: UUID,
+    data: LandmarkMessageCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    validate_location_fix(data.location_fix)
+
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event or event.is_cancelled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+
+    if not event.is_started or event.is_ended:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Event chat is only active while event is running")
+
+    is_part = db.query(EventParticipant).filter(
+        EventParticipant.event_id == event_id,
+        EventParticipant.user_id == current_user.id,
+    ).first()
+    if not is_part and event.host_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Must be a participant to send event messages")
+
+    # Invariant: Sender must be physically within event venue radius
+    user_pt = make_geography_point(data.location_fix.longitude, data.location_fix.latitude)
+    is_inside = db.query(
+        func.ST_DWithin(Event.venue_location, user_pt, Event.radius_meters)
+    ).filter(Event.id == event_id).scalar()
+
+    if not is_inside:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Outside event venue radius")
+
+    # Ensure ChannelSequence row exists so with_for_update() locks an actual row
+    db.execute(
+        text(
+            "INSERT INTO channel_sequences (channel_id, current_sequence) "
+            "VALUES (:cid, 0) ON CONFLICT (channel_id) DO NOTHING"
+        ),
+        {"cid": str(event_id)},
+    )
+
+    seq_row = db.query(ChannelSequence).filter(
+        ChannelSequence.channel_id == str(event_id)
+    ).with_for_update().first()
+
+    seq_row.current_sequence += 1
+    next_seq = seq_row.current_sequence
+
+    if data.attachment_id:
+        media = db.query(MediaObject).filter(MediaObject.id == data.attachment_id).first()
+        if not media:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment media not found")
+        if media.sender_id != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot attach media uploaded by another user")
+        if media.channel_kind != "event" or media.channel_id != str(event_id):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Attachment channel mismatch")
+        media.sequence = next_seq
+
+    display_name = current_user.anonymous_handle if current_user.identity_mode == "anonymous" else f"@{current_user.username}"
+    is_anon = current_user.identity_mode == "anonymous"
+    now_utc = datetime.now(timezone.utc)
+    expires_at = now_utc + timedelta(hours=current_user.message_retention_hours)
+
+    msg = Message(
+        channel_id=str(event_id),
+        channel_kind="event",
+        sender_id=current_user.id,
+        sender_display_name=display_name,
+        is_anonymous=is_anon,
+        body=data.body,
+        sequence=next_seq,
+        origin_location=user_pt,
+        area_name=event.area_name,
+        attachment_id=data.attachment_id,
+        expires_at=expires_at,
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+
+    return ChatMessageResponse(
+        id=msg.id,
+        channel_id=msg.channel_id,
+        sender_id=msg.sender_id,
+        sender_display_name=msg.sender_display_name,
+        is_anonymous=msg.is_anonymous,
+        body=msg.body,
+        sequence=msg.sequence,
+        area_name=msg.area_name,
+        distance_label="< 100m away",
+        attachment_id=msg.attachment_id,
+        is_system_notice=msg.is_system_notice,
+        created_at=msg.created_at,
+        expires_at=msg.expires_at,
+    )

@@ -166,8 +166,8 @@ def check_media_access_authorization(media: MediaObject, user_id: UUID, db: Sess
         if not visit:
             return False
 
-        # Freshness of visit heartbeat
-        if (now_utc - visit.last_heartbeat_at).total_seconds() > settings.MAX_LOCATION_AGE_SECONDS:
+        # Freshness of visit heartbeat (allowing 45s grace)
+        if (now_utc - visit.last_heartbeat_at).total_seconds() > 45.0:
             return False
 
         # Monotonic sequence & timestamp isolation: only media created during this visit
@@ -195,12 +195,7 @@ def check_media_access_authorization(media: MediaObject, user_id: UUID, db: Sess
         return participant is not None
 
     elif media.channel_kind == "dm":
-        # Sender can always view their own uploaded media
-        if media.sender_id == user_id:
-            return True
-        # If channel_id represents the DM recipient or thread
-        if media.channel_id == str(user_id):
-            return True
+        # Direct messaging media is deferred pending dedicated conversation schema
         return False
 
     return False

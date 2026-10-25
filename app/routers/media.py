@@ -32,10 +32,16 @@ async def upload_media(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if channel_kind not in ("landmark", "event", "dm"):
+    if channel_kind == "dm":
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Direct messaging media is deferred pending dedicated conversation schema",
+        )
+
+    if channel_kind not in ("landmark", "event"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid channel_kind. Must be one of: landmark, event, dm",
+            detail="Invalid channel_kind. Must be one of: landmark, event",
         )
 
     content = await file.read()
@@ -67,7 +73,7 @@ async def upload_media(
                 detail="Must have an active landmark visit to upload media.",
             )
 
-        if (now_utc - visit.last_heartbeat_at).total_seconds() > settings.MAX_LOCATION_AGE_SECONDS:
+        if (now_utc - visit.last_heartbeat_at).total_seconds() > 45.0:
             visit.is_active = False
             visit.exit_reason = "heartbeat_timeout"
             db.commit()
@@ -194,6 +200,12 @@ def download_media(
     media = db.query(MediaObject).filter(MediaObject.id == media_id).first()
     if not media or not os.path.exists(media.storage_path):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media not found")
+
+    # Defense against filesystem path traversal
+    clean_media_dir = os.path.abspath(settings.MEDIA_STORAGE_DIR)
+    clean_file_path = os.path.abspath(media.storage_path)
+    if not clean_file_path.startswith(clean_media_dir + os.sep):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     if not check_media_access_authorization(media, user_id, db):
         raise HTTPException(

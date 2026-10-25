@@ -3,9 +3,9 @@ from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func, and_, or_, text
 from app.database import get_db
-from app.models import Landmark, LandmarkVisit, ChannelSequence, Message, User, UserBlock
+from app.models import Landmark, LandmarkVisit, ChannelSequence, Message, User, UserBlock, MediaObject
 from app.schemas import (
     LandmarkResponse,
     LandmarkVisitResponse,
@@ -43,7 +43,6 @@ def list_landmarks(
         is_inside = None
 
         if user_pt is not None:
-            # Query ST_Distance and ST_DWithin
             row = db.query(
                 func.ST_Distance(Landmark.location, user_pt),
                 func.ST_DWithin(Landmark.location, user_pt, Landmark.radius_meters),
@@ -77,7 +76,6 @@ def enter_landmark(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Invariant: Ghost mode suppresses landmark chat entry
     if current_user.is_ghost_mode:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -101,14 +99,22 @@ def enter_landmark(
             detail="Outside authorized landmark radius",
         )
 
-    # Invariant: Transactionally terminate previous visits and capture current sequence boundary
+    # Invariant: Transactionally terminate previous visits
     db.query(LandmarkVisit).filter(
         LandmarkVisit.user_id == current_user.id,
         LandmarkVisit.landmark_id == landmark_id,
         LandmarkVisit.is_active == True,
     ).update({"is_active": False, "exit_reason": "new_visit"}, synchronize_session="fetch")
 
-    # Lock channel sequence row to establish monotonic entry boundary
+    # Ensure ChannelSequence row exists so with_for_update() locks an actual row
+    db.execute(
+        text(
+            "INSERT INTO channel_sequences (channel_id, current_sequence) "
+            "VALUES (:cid, 0) ON CONFLICT (channel_id) DO NOTHING"
+        ),
+        {"cid": str(landmark_id)},
+    )
+
     seq_row = db.query(ChannelSequence).filter(
         ChannelSequence.channel_id == str(landmark_id)
     ).with_for_update().first()
@@ -200,6 +206,8 @@ def leave_landmark(
 @router.get("/{landmark_id}/messages", response_model=List[ChatMessageResponse])
 def get_landmark_messages(
     landmark_id: UUID,
+    since_sequence: Optional[int] = Query(None, ge=0),
+    limit: int = Query(50, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -218,7 +226,6 @@ def get_landmark_messages(
             detail="No active visit session. Enter landmark with fresh GPS to view chat.",
         )
 
-    # Inactivity check: heartbeat must be within 45s (allowing 15s grace over 30s heartbeat interval)
     now_utc = datetime.now(timezone.utc)
     if (now_utc - visit.last_heartbeat_at).total_seconds() > 45.0:
         visit.is_active = False
@@ -229,7 +236,6 @@ def get_landmark_messages(
             detail="Visit session expired due to heartbeat timeout",
         )
 
-    # Blocked user exclusion
     blocked_ids = [
         row[0] for row in db.query(UserBlock.blocked_id).filter(UserBlock.blocker_id == current_user.id).all()
     ] + [
@@ -237,18 +243,22 @@ def get_landmark_messages(
     ]
 
     # Invariant: Query enforces sequence >= min_sequence AND created_at >= entered_at
+    # Even if client passes an old cursor (since_sequence < visit.min_message_sequence), boundary is clamped
+    effective_min_sequence = visit.min_message_sequence
+    if since_sequence is not None:
+        effective_min_sequence = max(visit.min_message_sequence, since_sequence + 1)
+
     query = db.query(Message).filter(
         Message.channel_id == str(landmark_id),
-        Message.sequence >= visit.min_message_sequence,
+        Message.sequence >= effective_min_sequence,
         Message.created_at >= visit.entered_at,
         Message.expires_at > func.now(),
     )
     if blocked_ids:
         query = query.filter(Message.sender_id.notin_(blocked_ids))
 
-    messages = query.order_by(Message.sequence.asc()).all()
+    messages = query.order_by(Message.sequence.asc()).limit(limit).all()
 
-    # Project to safe DTO (raw sender coordinates stripped)
     results = []
     for msg in messages:
         results.append(
@@ -292,6 +302,17 @@ def post_landmark_message(
     if not visit:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No active visit session")
 
+    now_utc = datetime.now(timezone.utc)
+    # Invariant: If visit heartbeat timed out, cannot post without re-entering
+    if (now_utc - visit.last_heartbeat_at).total_seconds() > 45.0:
+        visit.is_active = False
+        visit.exit_reason = "heartbeat_timeout"
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Visit session expired due to heartbeat timeout. Please re-enter landmark.",
+        )
+
     landmark = db.query(Landmark).filter(Landmark.id == landmark_id).first()
     user_pt = make_geography_point(data.location_fix.longitude, data.location_fix.latitude)
     is_inside = db.query(
@@ -304,24 +325,42 @@ def post_landmark_message(
         db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Outside authorized landmark radius")
 
-    # Invariant: Concurrency-safe monotonic channel sequence generation
+    # Ensure ChannelSequence row exists so with_for_update() locks an actual row
+    db.execute(
+        text(
+            "INSERT INTO channel_sequences (channel_id, current_sequence) "
+            "VALUES (:cid, 0) ON CONFLICT (channel_id) DO NOTHING"
+        ),
+        {"cid": str(landmark_id)},
+    )
+
     seq_row = db.query(ChannelSequence).filter(
         ChannelSequence.channel_id == str(landmark_id)
     ).with_for_update().first()
 
-    if not seq_row:
-        seq_row = ChannelSequence(channel_id=str(landmark_id), current_sequence=0)
-        db.add(seq_row)
-        db.flush()
-
     seq_row.current_sequence += 1
     next_seq = seq_row.current_sequence
 
-    # Display name projection based on current user identity mode
+    # Invariant: Validate attachment media ownership and channel association
+    if data.attachment_id:
+        media = db.query(MediaObject).filter(MediaObject.id == data.attachment_id).first()
+        if not media:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment media not found")
+        if media.sender_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cannot attach media uploaded by another user",
+            )
+        if media.channel_kind != "landmark" or media.channel_id != str(landmark_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attachment channel mismatch",
+            )
+        media.sequence = next_seq
+
     display_name = current_user.anonymous_handle if current_user.identity_mode == "anonymous" else f"@{current_user.username}"
     is_anon = current_user.identity_mode == "anonymous"
 
-    now_utc = datetime.now(timezone.utc)
     expires_at = now_utc + timedelta(hours=current_user.message_retention_hours)
 
     msg = Message(
