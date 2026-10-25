@@ -11,7 +11,7 @@ description: >-
 ## Repository Boundaries & Isolation Rules
 - **Backend Authoritative Repository:** Remote Debian host `kingp@192.168.86.189` at `/home/kingp/proximity-backend/`.
   - All application code, Alembic migrations, pytest tests, docker services, and git operations execute here.
-  - Remote GitHub URL: `git@github.com:PaoloCalvacca/Proximity-Backend.git`
+  - Remote GitHub URL: `git@github.com:Kingkiller987/Proximity-Backend.git`
 - **Frontend Workspace:** Local Mac `~/Documents/CodingStuff/Proximity/` — **STRICTLY READ-ONLY**.
   - NEVER edit, stage, commit, or push files in this repository.
   - Never combine frontend and backend into a monorepo or git submodule.

@@ -3,7 +3,7 @@
 ## Workspace Boundaries
 - **Authoritative Backend Host:** `/home/kingp/proximity-backend/` on Debian 13 (`kingp@192.168.86.189`).
   - Contains all backend application source code, Alembic migrations, database models, API routers, tests, and configuration.
-  - Remote repository: `git@github.com:PaoloCalvacca/Proximity-Backend.git`.
+  - Remote repository: `git@github.com:Kingkiller987/Proximity-Backend.git`.
 - **Frontend Workspace:** `~/Documents/CodingStuff/Proximity/` (Mac) — **STRICTLY READ-ONLY**.
   - Never edit, format, generate, delete, stage, commit, or modify any file in this directory.
   - Never create a monorepo or submodule combining frontend and backend.
