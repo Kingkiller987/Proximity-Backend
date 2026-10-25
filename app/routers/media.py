@@ -265,4 +265,4 @@ async def download_media(
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error retrieving media from storage")
 
-    return Response(content=data, media_type=media.mime_type)
+    return Response(content=data, media_type=media.mime_type, headers={"Cache-Control": "private, no-transform, max-age=300"})
