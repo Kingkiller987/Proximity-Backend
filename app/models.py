@@ -209,3 +209,23 @@ class EventParticipant(Base):
     joined_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     event = relationship("Event", back_populates="participants")
+
+
+class DmConversation(Base):
+    __tablename__ = "dm_conversations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    initiator_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    recipient_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    status = Column(String(20), default="pending", nullable=False)  # pending | accepted | declined
+    intro_message = Column(Text, default="", nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    initiator = relationship("User", foreign_keys=[initiator_id])
+    recipient = relationship("User", foreign_keys=[recipient_id])
+
+    __table_args__ = (
+        Index("idx_dm_conversations_participants", initiator_id, recipient_id),
+        Index("idx_dm_conversations_status", status),
+    )

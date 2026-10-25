@@ -200,13 +200,11 @@ def test_dm_media_upload_safely_deferred(client, db_session):
     token = r.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    # Attempt to upload with channel_kind="dm"
+    # Attempt to upload with unknown channel_id -> 404 conversation not found
     resp = client.post(
         "/media/upload",
         headers=headers,
         data={"channel_kind": "dm", "channel_id": str(uuid4())},
         files={"file": ("test.png", create_minimal_png(), "image/png")},
     )
-    # Expected: 501 Not Implemented because DM schema is deferred
-    assert resp.status_code == 501
-    assert "deferred" in resp.json()["detail"].lower()
+    assert resp.status_code == 404

@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.database import get_db
-from app.models import MediaObject, User, LandmarkVisit, EventParticipant, Event
+from app.models import MediaObject, User, LandmarkVisit, EventParticipant, Event, DmConversation, UserBlock
+from sqlalchemy import or_, and_
 from app.schemas import MediaUploadResponse, MediaDownloadTokenResponse
 from app.dependencies import get_current_user, get_optional_user
 from app.config import get_settings
@@ -32,16 +33,10 @@ async def upload_media(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if channel_kind == "dm":
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="Direct messaging media is deferred pending dedicated conversation schema",
-        )
-
-    if channel_kind not in ("landmark", "event"):
+    if channel_kind not in ("landmark", "event", "dm"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid channel_kind. Must be one of: landmark, event",
+            detail="Invalid channel_kind. Must be one of: landmark, event, dm",
         )
 
     content = await file.read()
@@ -106,6 +101,44 @@ async def upload_media(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Must be a participant of the event to upload media.",
             )
+
+    elif channel_kind == "dm":
+        try:
+            conv_uuid = UUID(channel_id)
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid conversation ID")
+
+        conv = db.query(DmConversation).filter(DmConversation.id == conv_uuid).first()
+        if not conv:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="DM conversation not found",
+            )
+        if current_user.id not in (conv.initiator_id, conv.recipient_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Must be a participant of the conversation to upload media.",
+            )
+        if conv.status != "accepted":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Direct messaging media is only allowed after the request is accepted.",
+            )
+
+        other_id = conv.recipient_id if conv.initiator_id == current_user.id else conv.initiator_id
+        is_blocked = db.query(UserBlock).filter(
+            or_(
+                and_(UserBlock.blocker_id == current_user.id, UserBlock.blocked_id == other_id),
+                and_(UserBlock.blocker_id == other_id, UserBlock.blocked_id == current_user.id),
+            )
+        ).first()
+        if is_blocked:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cannot upload media in conversation with blocked user.",
+            )
+
+        assigned_seq = 0
 
     os.makedirs(settings.MEDIA_STORAGE_DIR, exist_ok=True)
     media_id = uuid.uuid4()

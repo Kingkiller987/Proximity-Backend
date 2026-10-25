@@ -215,3 +215,35 @@ class NearbyParticipantResponse(BaseModel):
     area_name: str
     distance_label: str
     visible_in_nearby: bool = True
+
+
+# --- DIRECT MESSAGES ---
+
+class DmRequestCreate(BaseModel):
+    recipient_id: UUID
+    intro_message: str = Field("Hello!", min_length=1, max_length=1000)
+
+
+class DmResponseRequest(BaseModel):
+    accept: bool
+
+
+class DmMessageCreateRequest(BaseModel):
+    body: str = Field(..., min_length=1, max_length=2000)
+    attachment_id: Optional[UUID] = None
+
+
+class DmConversationResponse(BaseModel):
+    id: UUID
+    initiator_id: UUID
+    recipient_id: UUID
+    status: str
+    intro_message: str
+    other_user: PublicIdentityProjection
+    is_incoming: bool
+    last_message: Optional[ChatMessageResponse] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True

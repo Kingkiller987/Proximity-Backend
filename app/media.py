@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, func
 
 from app.config import get_settings
-from app.models import MediaObject, LandmarkVisit, UserBlock, EventParticipant, Event, User
+from app.models import MediaObject, LandmarkVisit, UserBlock, EventParticipant, Event, User, DmConversation
 
 settings = get_settings()
 
@@ -195,7 +195,15 @@ def check_media_access_authorization(media: MediaObject, user_id: UUID, db: Sess
         return participant is not None
 
     elif media.channel_kind == "dm":
-        # Direct messaging media is deferred pending dedicated conversation schema
-        return False
+        try:
+            conv_id = UUID(media.channel_id)
+        except ValueError:
+            return False
+
+        conv = db.query(DmConversation).filter(DmConversation.id == conv_id).first()
+        if not conv or conv.status != "accepted":
+            return False
+
+        return user_id in (conv.initiator_id, conv.recipient_id)
 
     return False

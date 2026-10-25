@@ -12,6 +12,7 @@ EXPECTED_TABLES = {
     "messages",
     "events",
     "event_participants",
+    "dm_conversations",
 }
 
 
