@@ -24,7 +24,7 @@ class Base(DeclarativeBase):
 
 
 class GeographyPoint(UserDefinedType):
-    """Custom PostgreSQL PostGIS geography(Point, 4326) type."""
+    cache_ok = True
     def get_col_spec(self, **kw):
         return "geography(Point, 4326)"
 
